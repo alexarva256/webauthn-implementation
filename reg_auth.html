@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>YubiKey WebAuthn - IndexedDB</title>
+  <style>
+    body { font-family: sans-serif; background: #111827; color: white; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+    .container { display: flex; gap: 20px; max-width: 900px; width: 100%; padding: 20px; flex-wrap: wrap; }
+    .box { background: #1f2937; padding: 30px; border-radius: 10px; flex: 1; display: flex; flex-direction: column; box-shadow: 0 4px 6px rgba(0,0,0,0.3); min-width: 300px; }
+    h2 { margin-top: 0; color: #f3f4f6; font-size: 1.2rem; border-bottom: 1px solid #374151; padding-bottom: 10px; }
+    input { width: 100%; padding: 12px; margin-bottom: 20px; border-radius: 8px; border: 1px solid #374151; background: #0f172a; color: white; box-sizing: border-box; }
+    button { width: 100%; padding: 14px; border: none; border-radius: 8px; font-size: 15px; font-weight: bold; cursor: pointer; transition: background 0.2s; color: white;}
+    .btn-register { background: #2563eb; } .btn-register:hover { background: #1d4ed8; }
+    .btn-login { background: #10b981; margin-bottom: 20px; } .btn-login:hover { background: #059669; }
+    pre { margin-top: 20px; background: #0f172a; padding: 15px; border-radius: 8px; font-size: 12px; color: #10b981; white-space: pre-wrap; word-wrap: break-word; flex-grow: 1; overflow-x: auto; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <!-- REGISTRATION PANEL -->
+  <div class="box">
+    <h2>1. Register New Key</h2>
+    <input type="text" id="reg-username" placeholder="Enter a username...">
+    <button class="btn-register" id="registerBtn">Register YubiKey</button>
+    <pre id="reg-output">Awaiting registration...</pre>
+  </div>
+
+  <!-- LOGIN PANEL -->
+  <div class="box">
+    <h2>2. Login (Discoverable Credential)</h2>
+    <!-- Username input has been removed! -->
+    <button class="btn-login" id="loginBtn">Authenticate</button>
+    <pre id="login-output">Awaiting authentication...</pre>
+  </div>
+</div>
+
+<script>
+// ==========================================
+// 1. HELPER FUNCTIONS
+// ==========================================
+function bufferToBase64url(buffer) {
+  return btoa(String.fromCharCode(...new Uint8Array(buffer)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
+function base64URLStringToBuffer(base64URLString) {
+    const base64 = base64URLString.replace(/-/g, '+').replace(/_/g, '/');
+    const padLen = (4 - (base64.length % 4)) % 4;
+    const padded = base64.padEnd(base64.length + padLen, '=');
+    const binary = atob(padded);
+    const buffer = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        buffer[i] = binary.charCodeAt(i);
+    }
+    return buffer;
+}
+
+function generateRandomChallenge() {
+    return window.crypto.getRandomValues(new Uint8Array(32));
+}
+
+function logToScreen(id, text, clear = false) {
+    const output = document.getElementById(id);
+    if (!output) return; 
+    if (clear) output.innerText = "";
+    output.innerText += text + "\n";
+}
+
+// ==========================================
+// 2. INDEXED DB SETUP & FIDO CACHE
+// ==========================================
+const dbPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open('WebAuthnLocalDB', 2);
+    
+    request.onupgradeneeded = (event) => {
+        const db = event.target.result;
+        if (!db.objectStoreNames.contains('users')) {
+            db.createObjectStore('users', { keyPath: 'username' });
+        }
+
+        if (!db.objectStoreNames.contains('config')){
+            db.createObjectStore("config", {keyPath: 'key'})
+        }
+    };
+    
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+});
+
+async function dbSaveUser(userData) {
+    const db = await dbPromise;
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction('users', 'readwrite');
+        const store = transaction.objectStore('users');
+        store.put(userData);
+        transaction.oncomplete = resolve;
+        transaction.onerror = reject;
+    });
+}
+
+async function dbGetUser(username) {
+    const db = await dbPromise;
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction('users', 'readonly');
+        const store = transaction.objectStore('users');
+        const request = store.get(username);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = reject;
+    });
+}
+
+async function setNextFetchTime(timestamp) {
+    const db = await dbPromise;
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction('config', 'readwrite');
+        transaction.objectStore('config').put({ key: 'next_fido_fetch', value: timestamp });
+        transaction.oncomplete = resolve;
+        transaction.onerror = reject;
+    });
+} 
+
+async function getNextFetchTime() {
+    const db = await dbPromise;
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction('config', 'readonly');
+        const request = transaction.objectStore('config').get('next_fido_fetch');
+        request.onsuccess = () => resolve(request.result ? request.result.value : 0);
+        request.onerror = reject;
+    });
+}
+
+// Global cache for FIDO metadata
+let memoryCache = {
+    data: null,
+    serialNumber: null 
+};
+
+// We use a CORS proxy here because browsers block direct frontend requests to FIDO.
+const FIDO_MDS_URL = 'https://c-mds.fidoalliance.org';
+
+/**
+ * Decodes a FIDO JWT BLOB in the BROWSER (No Node.js Buffer needed)
+ */
+function decodeFidoBlobBrowser(rawBlob) {
+    const parts = rawBlob.split('.');
+    if (parts.length !== 3) throw new Error("Invalid BLOB format. Expected 3 parts.");
+    
+    let base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (base64.length % 4) { base64 += '='; }
+    
+    // Safely decode Base64 to UTF-8 in the browser
+    const jsonPayload = decodeURIComponent(window.atob(base64).split('').map(function(c) {
+        return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+    }).join(''));
+    
+    return JSON.parse(jsonPayload);
+}
+
+/**
+ * Fetches the FIDO Metadata BLOB, using Conditional GETs to check for updates.
+ */
+
+async function getFidoMetadata() {
+    const fetchOptions = { method: 'GET', headers: {} };
+
+    if (memoryCache.serialNumber) {
+        fetchOptions.headers['If-None-Match'] = memoryCache.serialNumber;
+        console.log(`Checking FIDO for updates. My version: ${memoryCache.serialNumber}`);
+    }
+
+    try {
+        const response = await fetch(FIDO_MDS_URL, fetchOptions);
+        
+        if (response.status === 304) {
+            console.log("Server returned 304 Not Modified. Cache up to date!");
+            return memoryCache.data;
+        }
+    
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    
+        console.log("New data received! Updating cache...");
+        const rawBlob = await response.text(); 
+        const newSerialNumber = response.headers.get('ETag'); 
+
+        memoryCache.data = decodeFidoBlobBrowser(rawBlob);
+
+        if (newSerialNumber) {
+            memoryCache.serialNumber = newSerialNumber.replace(/"/g, ''); 
+        }
+    
+        return memoryCache.data;
+    
+    } catch (error) {
+        console.error("Failed to reach FIDO MDS:", error);
+        if (memoryCache.data) return memoryCache.data; // Fallback
+        throw new Error("FIDO MDS is unreachable and no local cache exists.");
+    }
+}
+
+async function checkAndInitializeFidoCMDS() {
+    const now = Date.now();
+    const nextFetchDue = await getNextFetchTime();
+
+    // If we've never fetched, OR the current time has passed the due date
+    if (now >= nextFetchDue) {
+        console.log("Fetch is due! Querying FIDO MDS...");
+        await getFidoMetadata();
+        
+        // Schedule the next fetch for exactly 2 weeks from right now
+        const twoWeeksFromNow = now + (14 * 24 * 60 * 60 * 1000);
+        await setNextFetchTime(twoWeeksFromNow);
+    } else {
+        const daysLeft = ((nextFetchDue - now) / (1000 * 60 * 60 * 24)).toFixed(1);
+        console.log(`Cache is fresh. Next update required in ${daysLeft} days.`);
+        
+        // Optional fallback: If data isn't in memory yet (app just restarted),
+        // load your locally saved backup so the app works instantly.
+        if (!memoryCache.data) {
+            await loadLocalCacheBackup(); 
+        }
+    }
+}
+
+// ==========================================
+// 3. REGISTRATION LOGIC
+// ==========================================
+
+document.getElementById('registerBtn').addEventListener('click', async () => {
+    const username = document.getElementById('reg-username').value;
+    if (!username) return alert("Enter a username to register.");
+
+    logToScreen('reg-output', "Checking database for existing keys...", true);
+
+    const existingUser = await dbGetUser(username);
+    const excludeCredentials = [];
+
+    if (existingUser && existingUser.credentialId) {
+        excludeCredentials.push({
+            type: "public-key",
+            id: base64URLStringToBuffer(existingUser.credentialId)
+        });
+    }
+
+    const encryptionSalt = generateRandomChallenge();
+
+    const publicKey = {
+        rp: { name: "Local DB Lab", id: window.location.hostname },
+        user: {
+            id: new TextEncoder().encode(username), 
+            name: username,
+            displayName: username,
+        },
+        challenge: generateRandomChallenge(),
+        pubKeyCredParams: [
+            { type: "public-key", alg: -7 },   
+            { type: "public-key", alg: -257 }  
+        ],
+        excludeCredentials: excludeCredentials,
+        authenticatorSelection: { residentKey: "preferred", userVerification: "preferred" },
+        timeout: 60000,
+        attestation: "direct",
+        extensions: { prf: { eval: {first: encryptionSalt} } }
+    };
+
+    try {
+        logToScreen('reg-output', "Tap your YubiKey...");
+        const credential = await navigator.credentials.create({ publicKey });
+        
+        const prfResults = credential.getClientExtensionResults();
+        let symmetricKey; 
+
+        if (prfResults.prf && prfResults.prf.results) {
+            symmetricKey = prfResults.prf.results.first; 
+        } else {
+            throw new Error('PRF is not supported or was not enabled on this device.');
+        }
+
+        const newUserData = {
+            username: username,
+            credentialId: credential.id, 
+            publicKey: bufferToBase64url(credential.response.getPublicKey()) 
+        };
+
+        await dbSaveUser(newUserData);
+
+        const authDataBuffer = credential.response.getAuthenticatorData();
+        const authData = new Uint8Array(authDataBuffer);
+        const aaguidBytes = authData.slice(37, 53);
+        const aaguidHex = Array.from(aaguidBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+        const aaguid = `${aaguidHex.slice(0,8)}-${aaguidHex.slice(8,12)}-${aaguidHex.slice(12,16)}-${aaguidHex.slice(16,20)}-${aaguidHex.slice(20)}`;
+            
+        logToScreen('reg-output', "\nAuthenticator AAGUID: " + aaguid);
+
+        // --- FIDO METADATA FETCH & CHECK (BACKEND DELEGATION) ---
+        logToScreen('reg-output', "Sending AAGUID to backend process memory store...");
+        
+        try {
+            const apiResponse = await fetch('http://localhost:4000/api/lookup-aaguid', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ aaguid: aaguid })
+            });
+
+            if (!apiResponse.ok) throw new Error("Backend lookup error.");
+
+            const resultData = await apiResponse.json();
+            logToScreen('reg-output', "Device Model: " + resultData.description);
+
+        } catch (apiErr) {
+            console.error(apiErr);
+            logToScreen('reg-output', "Device Model: Lookup failed (Backend offline)");
+        }
+        
+        logToScreen('reg-output', "\nSaved to IndexedDB!");
+        logToScreen('reg-output', "Deriving AES-GCM Vault Key..."); 
+
+        const masterKey = await crypto.subtle.importKey(
+            'raw', symmetricKey, 'HKDF', false, ['deriveKey']
+        );
+
+        const aesKey = await crypto.subtle.deriveKey(
+            { name: 'HKDF', salt: new Uint8Array(), hash: 'SHA-256', info: new TextEncoder().encode('AES-GCM Vault Encryption Key V1') },
+            masterKey,
+            { name: 'AES-GCM', length: 256 },
+            false,
+            ['encrypt', 'decrypt']
+        );
+        
+        console.log("Success! Your AES Key Object:", aesKey);
+        logToScreen('reg-output', "Registration Complete!");
+
+    } catch (err) {
+        logToScreen('reg-output', "\n Error: " + err.message);
+    }
+});
+
+// ==========================================
+// 4. AUTHENTICATION LOGIC (Unchanged)
+// ==========================================
+document.getElementById('loginBtn').addEventListener('click', async () => {
+    const logId = 'login-output';
+    logToScreen(logId, "Setting up challenge...", true);
+
+    const encryptionSalt = generateRandomChallenge(); 
+
+    try {
+        const publicKeyRequest = {
+            challenge: generateRandomChallenge(),
+            timeout: 60000,
+            rpId: window.location.hostname,
+            userVerification: "preferred",
+            extensions: { prf: { eval: { first: encryptionSalt } } }
+        };
+
+        logToScreen(logId, "Tap your YubiKey...");
+        const assertion = await navigator.credentials.get({ publicKey: publicKeyRequest });
+
+        const userHandle = assertion.response.userHandle;
+        if (!userHandle) throw new Error("No user handle found.");
+        
+        const identifiedUsername = new TextDecoder().decode(userHandle);
+        logToScreen(logId, `Key identifies as: "${identifiedUsername}"`);
+
+        const dbUser = await dbGetUser(identifiedUsername);
+        const credID = assertion.id;
+        
+        if (!dbUser) {
+            logToScreen(logId, `User "${identifiedUsername}" not found in DB. Signaling browser...`);
+            if (window.PublicKeyCredential && PublicKeyCredential.signalUnknownCredential) {
+                try {
+                    await PublicKeyCredential.signalUnknownCredential({ rpId: window.location.hostname, credentialId: credID });
+                } catch (signalErr) { console.error("Signal API failed:", signalErr); }
+            }
+            throw new Error(`SECURITY ALERT: User "${identifiedUsername}" DELETED. Access Denied.`);
+        }
+
+        const extensionResults = assertion.getClientExtensionResults();
+        const prfResults = extensionResults?.prf?.results?.first;
+        if (!prfResults) throw new Error("PRF not supported/enabled.");
+
+        logToScreen(logId, "Deriving AES-GCM Vault Key...");
+
+        const masterKey = await crypto.subtle.importKey(
+            'raw', prfResults, 'HKDF', false, ['deriveKey']
+        );
+
+        const aesKey = await crypto.subtle.deriveKey(
+            { name: 'HKDF', salt: new Uint8Array(), hash: 'SHA-256', info: new TextEncoder().encode('AES-GCM Vault Encryption Key V1') },
+            masterKey,
+            { name: 'AES-GCM', length: 256 },
+            false,
+            ['encrypt', 'decrypt']
+        );
+
+        logToScreen(logId, "\n LOGIN SUCCESSFUL!");
+        logToScreen(logId, "Welcome back, " + identifiedUsername);
+        
+    } catch (err) {
+        logToScreen(logId, "\n " + err.message);
+    }
+});
+</script>
+
+</body>
+</html>
