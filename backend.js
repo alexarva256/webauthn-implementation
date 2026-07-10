@@ -5,15 +5,17 @@ let memoryCache = {
     serialNumber: null,
     nextFetchDue: 0 
 };
-
-const FIDO_MDS_URL = 'https://c-mds.fidoalliance.org/';
+//we will use the following but for testing we will use the local server!
+//const FIDO_MDS_URL = 'https://c-mds.fidoalliance.org/';
+const FIDO_MDS_URL = 'http://localhost:8080/';
 const TWO_WEEKS_MS = 14 * 24 * 60 * 60 * 1000;
 
-function decodeFidoBlob(rawBlob) {
-    const parts = rawBlob.trim().split('.');
-    if (parts.length !== 3) throw new Error("Invalid BLOB format.");
-    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-}
+//the convenience MDS metadata are currently sent in .json format so no need to decode the jwt blob.
+//function decodeFidoBlob(rawBlob) {
+//    const parts = rawBlob.trim().split('.');
+//    if (parts.length !== 3) throw new Error("Invalid BLOB format.");
+//    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+//}
 
 async function refreshFidoMdsCache() {
     const fetchOptions = { method: 'GET', headers: {} };
@@ -31,12 +33,16 @@ async function refreshFidoMdsCache() {
         }
         
         if (!response.ok) throw new Error(`MDS responded with HTTP ${response.status}`);
-        
-        const rawBlob = await response.text();
-        const etag = response.headers.get('ETag');
-        const parsedJwt = decodeFidoBlob(rawBlob);
+        /** 
+        *again usefull if we were using the real FIDO MDS and we expected jwt blob, but for now we are using the 
+        *convenience MDS metadata in .json format so no need to decode the jwt blob.
+        */
+        //const rawBlob = await response.text();
+        const etag = await response.headers.get('ETag');
+        //const parsedJwt = decodeFidoBlob(rawBlob);
+        const data = await response.json();
 
-        memoryCache.data = parsedJwt.entries; 
+        memoryCache.data = data; 
         memoryCache.serialNumber = etag ? etag.replace(/"/g, '') : null;
         memoryCache.nextFetchDue = Date.now() + TWO_WEEKS_MS;
         
@@ -77,20 +83,21 @@ const server = http.createServer(async (req, res) => {
         req.on('end', () => {
             try {
                 const { aaguid } = JSON.parse(body);
-                
+
                 if (!memoryCache.data) {
                     res.writeHead(503, { 'Content-Type': 'application/json' });
                     return res.end(JSON.stringify({ error: 'FIDO Store initializing or unavailable. Please try again.' }));
                 }
+                const matchedDevice = memoryCache.data[aaguid];
 
-                const matchedDevice = memoryCache.data.find(entry => entry.aaguid === aaguid);
-                const description = matchedDevice?.metadataStatement?.description || "Unknown Authenticator";
-
+                const description = matchedDevice?.friendlyNames?.['en-US'] || "Unknown Authenticator";
+            
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ description }));
             } catch (err) {
+                console.error("Backend Error during lookup:", err); 
                 res.writeHead(400, { 'Content-Type': 'text/plain' });
-                res.end('Bad Request');
+                res.end('Bad Request / Internal Error');
             }
         });
     } else {

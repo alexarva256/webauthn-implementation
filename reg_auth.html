@@ -18,7 +18,6 @@
 <body>
 
 <div class="container">
-  <!-- REGISTRATION PANEL -->
   <div class="box">
     <h2>1. Register New Key</h2>
     <input type="text" id="reg-username" placeholder="Enter a username...">
@@ -26,10 +25,8 @@
     <pre id="reg-output">Awaiting registration...</pre>
   </div>
 
-  <!-- LOGIN PANEL -->
   <div class="box">
     <h2>2. Login (Discoverable Credential)</h2>
-    <!-- Username input has been removed! -->
     <button class="btn-login" id="loginBtn">Authenticate</button>
     <pre id="login-output">Awaiting authentication...</pre>
   </div>
@@ -37,7 +34,7 @@
 
 <script>
 // ==========================================
-// 1. HELPER FUNCTIONS
+//  HELPER FUNCTIONS
 // ==========================================
 function bufferToBase64url(buffer) {
   return btoa(String.fromCharCode(...new Uint8Array(buffer)))
@@ -68,19 +65,17 @@ function logToScreen(id, text, clear = false) {
 }
 
 // ==========================================
-// 2. INDEXED DB SETUP & FIDO CACHE
+//  INDEXED DB SETUP
 // ==========================================
 const dbPromise = new Promise((resolve, reject) => {
-    const request = indexedDB.open('WebAuthnLocalDB', 2);
+    // Note: Version bumped or kept the same. 
+    // Removed the 'config' store creation entirely.
+    const request = indexedDB.open('WebAuthnLocalDB', 3);
     
     request.onupgradeneeded = (event) => {
         const db = event.target.result;
         if (!db.objectStoreNames.contains('users')) {
             db.createObjectStore('users', { keyPath: 'username' });
-        }
-
-        if (!db.objectStoreNames.contains('config')){
-            db.createObjectStore("config", {keyPath: 'key'})
         }
     };
     
@@ -110,122 +105,9 @@ async function dbGetUser(username) {
     });
 }
 
-async function setNextFetchTime(timestamp) {
-    const db = await dbPromise;
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction('config', 'readwrite');
-        transaction.objectStore('config').put({ key: 'next_fido_fetch', value: timestamp });
-        transaction.oncomplete = resolve;
-        transaction.onerror = reject;
-    });
-} 
-
-async function getNextFetchTime() {
-    const db = await dbPromise;
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction('config', 'readonly');
-        const request = transaction.objectStore('config').get('next_fido_fetch');
-        request.onsuccess = () => resolve(request.result ? request.result.value : 0);
-        request.onerror = reject;
-    });
-}
-
-// Global cache for FIDO metadata
-let memoryCache = {
-    data: null,
-    serialNumber: null 
-};
-
-// We use a CORS proxy here because browsers block direct frontend requests to FIDO.
-const FIDO_MDS_URL = 'https://c-mds.fidoalliance.org';
-
-/**
- * Decodes a FIDO JWT BLOB in the BROWSER (No Node.js Buffer needed)
- */
-function decodeFidoBlobBrowser(rawBlob) {
-    const parts = rawBlob.split('.');
-    if (parts.length !== 3) throw new Error("Invalid BLOB format. Expected 3 parts.");
-    
-    let base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-    while (base64.length % 4) { base64 += '='; }
-    
-    // Safely decode Base64 to UTF-8 in the browser
-    const jsonPayload = decodeURIComponent(window.atob(base64).split('').map(function(c) {
-        return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
-    }).join(''));
-    
-    return JSON.parse(jsonPayload);
-}
-
-/**
- * Fetches the FIDO Metadata BLOB, using Conditional GETs to check for updates.
- */
-
-async function getFidoMetadata() {
-    const fetchOptions = { method: 'GET', headers: {} };
-
-    if (memoryCache.serialNumber) {
-        fetchOptions.headers['If-None-Match'] = memoryCache.serialNumber;
-        console.log(`Checking FIDO for updates. My version: ${memoryCache.serialNumber}`);
-    }
-
-    try {
-        const response = await fetch(FIDO_MDS_URL, fetchOptions);
-        
-        if (response.status === 304) {
-            console.log("Server returned 304 Not Modified. Cache up to date!");
-            return memoryCache.data;
-        }
-    
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-    
-        console.log("New data received! Updating cache...");
-        const rawBlob = await response.text(); 
-        const newSerialNumber = response.headers.get('ETag'); 
-
-        memoryCache.data = decodeFidoBlobBrowser(rawBlob);
-
-        if (newSerialNumber) {
-            memoryCache.serialNumber = newSerialNumber.replace(/"/g, ''); 
-        }
-    
-        return memoryCache.data;
-    
-    } catch (error) {
-        console.error("Failed to reach FIDO MDS:", error);
-        if (memoryCache.data) return memoryCache.data; // Fallback
-        throw new Error("FIDO MDS is unreachable and no local cache exists.");
-    }
-}
-
-async function checkAndInitializeFidoCMDS() {
-    const now = Date.now();
-    const nextFetchDue = await getNextFetchTime();
-
-    // If we've never fetched, OR the current time has passed the due date
-    if (now >= nextFetchDue) {
-        console.log("Fetch is due! Querying FIDO MDS...");
-        await getFidoMetadata();
-        
-        // Schedule the next fetch for exactly 2 weeks from right now
-        const twoWeeksFromNow = now + (14 * 24 * 60 * 60 * 1000);
-        await setNextFetchTime(twoWeeksFromNow);
-    } else {
-        const daysLeft = ((nextFetchDue - now) / (1000 * 60 * 60 * 24)).toFixed(1);
-        console.log(`Cache is fresh. Next update required in ${daysLeft} days.`);
-        
-        // Optional fallback: If data isn't in memory yet (app just restarted),
-        // load your locally saved backup so the app works instantly.
-        if (!memoryCache.data) {
-            await loadLocalCacheBackup(); 
-        }
-    }
-}
-
 // ==========================================
-// 3. REGISTRATION LOGIC
+//  REGISTRATION LOGIC
 // ==========================================
-
 document.getElementById('registerBtn').addEventListener('click', async () => {
     const username = document.getElementById('reg-username').value;
     if (!username) return alert("Enter a username to register.");
@@ -284,6 +166,7 @@ document.getElementById('registerBtn').addEventListener('click', async () => {
 
         await dbSaveUser(newUserData);
 
+        // Extract AAGUID
         const authDataBuffer = credential.response.getAuthenticatorData();
         const authData = new Uint8Array(authDataBuffer);
         const aaguidBytes = authData.slice(37, 53);
@@ -292,7 +175,7 @@ document.getElementById('registerBtn').addEventListener('click', async () => {
             
         logToScreen('reg-output', "\nAuthenticator AAGUID: " + aaguid);
 
-        // --- FIDO METADATA FETCH & CHECK (BACKEND DELEGATION) ---
+       // --- BACKEND DELEGATION ---
         logToScreen('reg-output', "Sending AAGUID to backend process memory store...");
         
         try {
@@ -302,14 +185,19 @@ document.getElementById('registerBtn').addEventListener('click', async () => {
                 body: JSON.stringify({ aaguid: aaguid })
             });
 
-            if (!apiResponse.ok) throw new Error("Backend lookup error.");
+            // If the backend responds with an error status (like 500 or 503), read the message
+            if (!apiResponse.ok) {
+                const errorData = await apiResponse.text();
+                throw new Error(`Backend refused (HTTP ${apiResponse.status}): ${errorData}`);
+            }
 
             const resultData = await apiResponse.json();
             logToScreen('reg-output', "Device Model: " + resultData.description);
 
         } catch (apiErr) {
-            console.error(apiErr);
-            logToScreen('reg-output', "Device Model: Lookup failed (Backend offline)");
+            // Now it will print the REAL error instead of just "offline"
+            console.error("Full Error Details:", apiErr);
+            logToScreen('reg-output', `Lookup failed: ${apiErr.message}`);
         }
         
         logToScreen('reg-output', "\nSaved to IndexedDB!");
@@ -336,7 +224,7 @@ document.getElementById('registerBtn').addEventListener('click', async () => {
 });
 
 // ==========================================
-// 4. AUTHENTICATION LOGIC (Unchanged)
+//  AUTHENTICATION LOGIC
 // ==========================================
 document.getElementById('loginBtn').addEventListener('click', async () => {
     const logId = 'login-output';
