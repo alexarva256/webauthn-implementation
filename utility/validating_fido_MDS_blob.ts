@@ -1,5 +1,6 @@
 
 import { X509Certificate } from 'node:crypto';
+import { Buffer } from 'node:buffer';
 
 /**
  * Validates an x5c certificate chain against a trusted root.

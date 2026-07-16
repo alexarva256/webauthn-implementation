@@ -1,7 +1,4 @@
 {
-  "dependencies": {
-    "crypto": "^1.0.1"
-  },
   "devDependencies": {
     "@types/node": "^26.1.1"
   }

@@ -164,13 +164,12 @@ async function executeFidoSync() {
   }
 }
 
-// Run the script and exit
 executeFidoSync()
     .then(() => {
-        console.log("✅ Sync complete. Exiting.");
+        console.log("Sync complete. Exiting.");
         process.exit(0);
     })
     .catch(err => {
-        console.error("❌ Fatal Error during sync:", err);
+        console.error("Fatal Error during sync:", err);
         process.exit(1);
     });
