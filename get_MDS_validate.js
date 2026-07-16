@@ -5,8 +5,8 @@ const crypto = require('crypto');
 let memoryCache = { data: null, nextUpdate: 0 };
 
 //const BLOB_LOCAL_PATH = path.join(__dirname, '../cert_and_data', 'blob.jwt');
-const BLOB_LOCAL_PATH = path.join(__dirname, '../cert_and_data', 'blob.jwt');
-const ROOT_R3_PATH    = path.join(__dirname, '../cert_and_data', 'root-r3.crt'); 
+const BLOB_LOCAL_PATH = path.join(__dirname, 'blob.jwt');
+const ROOT_R3_PATH    = path.join(__dirname, 'root-r3.crt'); 
 
 const FIDO_MDS_URL_LOCAL = 'https://mds.fidoalliance.org/'; 
 //const FIDO_MDS_URL_LOCAL = 'http://localhost:8080/';
@@ -151,6 +151,22 @@ async function tryLoadingFromDiskBackup() {
   } catch (err) {
     console.log("No local blob.jwt found. First initialization run required.");
   }
+  //try {
+  //  const rootCert = await fs.readFile(TRUSTED_ROOT_PATH, 'utf8');
+  //  const trustedRoot = new crypto.X509Certificate(rootCert);
+  //  const validfrom = new Date(trustedRoot.validFrom).getTime();
+  //  const validto = new Date(trustedRoot.validTo).getTime();
+  //  const now = Date.now();
+  //  if (now < validfrom || now > validto) {
+  //    throw new Error("Local trusted root certificate is expired or not yet valid. Need to fetch a new one.");
+  //    
+  //  }
+  //  console.log("Loaded trusted root certificate from local disk.");
+  //} catch (err) {
+  //  console.log("No local trusted root certificate found another initialization run required.");
+  //}
+
+
 }
 
 async function executeFidoSync() {
