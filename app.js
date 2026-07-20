@@ -73,7 +73,7 @@ const Database = {
 const CryptoManager = {
 	/**
 	 * Derives an AES-GCM encryption key from the WebAuthn PRF output.
-	 * @param {ArrayBuffer} prfOutput - The symmetric key material from the authenticator.
+	 * @param {ArrayBuffer} prfOutput 
 	 */
 	async deriveVaultKey(prfOutput) {
 		if (!prfOutput) throw new Error("PRF is not supported or was not enabled on this device.");
