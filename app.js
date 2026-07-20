@@ -1,5 +1,5 @@
 /**
- * UTILITIES & FORMATTING
+ * UTILITIES AND FORMATTING
 */
 const Utils = {
 	bufferToBase64url(buffer) {
@@ -28,7 +28,7 @@ const Utils = {
 };
 
 /**
-*  STORAGE (INDEXED DB)
+*  INDEXED DB
 */
 const Database = {
 	async getDB() {
@@ -124,7 +124,7 @@ const BackendAPI = {
 };
 
 /**
-*  WEBAUTHN ORCHESTRATION
+*  WEBAUTHN IMPLEMENTATION
 */
 
 async function handleRegistration(username) {
