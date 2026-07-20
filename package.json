@@ -1,6 +1,5 @@
 {
   "dependencies": {
-    "@auth0/nextjs-auth0": "^0.16.1",
-    "cbor": "^10.0.12"
+    "pkijs": "^3.4.0"
   }
 }
