@@ -28,7 +28,8 @@ async function verifyCertificateChain({ trustedRoot, leaf, intermediates = [] })
     
     const builtRoot = builtChain[builtChain.length - 1];
     if (builtRoot.thumbprint !== rootCa.thumbprint) {
-      throw new Error("Chain is valid, but does not anchor to the expected root.");
+      console.error("Certificate chain does not terminate at the trusted root.");
+      return false;
     }
 
     return true;

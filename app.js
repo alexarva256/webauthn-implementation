@@ -33,79 +33,6 @@ function clearLogs(logId) {
 }
 
 /**
-*  INDEXED DB
-*/
-const Database = {
-	async getDB() {
-		return new Promise((resolve, reject) => {
-			const request = indexedDB.open('WebAuthnLocalDB', 3);
-			request.onupgradeneeded = (e) => {
-				const db = e.target.result;
-				if (!db.objectStoreNames.contains('users')) {
-					db.createObjectStore('users', { keyPath: 'username' });
-				}
-			};
-			request.onsuccess = () => resolve(request.result);
-			request.onerror = () => reject(request.error);
-		});
-	},
-
-	async saveUser(userData) {
-		const db = await this.getDB();
-		return new Promise((resolve, reject) => {
-			const transaction = db.transaction('users', 'readwrite');
-			transaction.objectStore('users').put(userData);
-			transaction.oncomplete = resolve;
-			transaction.onerror = reject;
-		});
-	},
-
-	async getUser(username) {
-		const db = await this.getDB();
-		return new Promise((resolve, reject) => {
-			const transaction = db.transaction('users', 'readonly');
-			const request = transaction.objectStore('users').get(username);
-			request.onsuccess = () => resolve(request.result);
-			request.onerror = reject;
-		});
-	}
-};
-
-/**
-*  CRYPTOGRAPHY
-*/
-
-const CryptoManager = {
-	/**
-	 * Derives an AES-GCM encryption key from the WebAuthn PRF output.
-	 * @param {ArrayBuffer} prfOutput 
-	 */
-	async deriveVaultKey(prfOutput) {
-		if (!prfOutput) {
-			throw new Error("PRF is not supported or was not enabled on this device.")
-		};
-		const masterKey = await crypto.subtle.importKey(
-			'raw', prfOutput, 'HKDF', false, ['deriveKey']
-		);
-
-		const aesKey = await crypto.subtle.deriveKey(
-			{
-				name: 'HKDF',
-				salt: new Uint8Array(),
-				hash: 'SHA-256',
-				info: new TextEncoder().encode('AES-GCM Vault Encryption Key V1')
-			},
-			masterKey,
-			{ name: 'AES-GCM', length: 256 },
-			false,
-			['encrypt', 'decrypt']
-		);
-
-		return aesKey;
-	}
-};
-
-/**
 *  BACKEND API CALLS
 */
 
@@ -117,6 +44,7 @@ const BackendAPI = {
 	async verifyRegistration(payload) {
 		const response = await fetch('http://localhost:4000/api/register', {
 			method: 'POST',
+			cors: 'no-cors',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(payload)
 		});
@@ -130,7 +58,7 @@ const BackendAPI = {
 };
 
 /**
-*  WEBAUTHN IMPLEMENTATION
+*  WEBAUTHN REGISTRATION 
 */
 
 async function handleRegistration(username) {
@@ -138,17 +66,11 @@ async function handleRegistration(username) {
 	const logId = 'reg-output';
 	clearLogs(logId);
 	Utils.log(logId, "Starting Registration...");
-	//Utils.log(logId, "Checking database for existing keys...", true);
 
-	//const existingUser = await Database.getUser(username);
-	//const excludeCredentials = existingUser?.credentialId
-	//    ? [{ type: "public-key", id: Utils.base64URLStringToBuffer(existingUser.credentialId) }]
-	//    : [];
-	//
 	const encryptionSalt = Utils.generateChallenge();
 
 	const publicKey = {
-		rp: { name: "Local DB Lab", id: window.location.hostname },
+		rp: { name: "Alex made an app", id: window.location.hostname },
 		user: {
 			id: new TextEncoder().encode(username),
 			name: username,
@@ -156,7 +78,6 @@ async function handleRegistration(username) {
 		},
 		challenge: Utils.generateChallenge(),
 		pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
-		//excludeCredentials,
 		authenticatorSelection: { residentKey: "preferred", userVerification: "preferred" },
 		timeout: 60000,
 		attestation: "direct",
@@ -165,13 +86,6 @@ async function handleRegistration(username) {
 
 	Utils.log(logId, "Tap your YubiKey...");
 	const credential = await navigator.credentials.create({ publicKey });
-
-await Database.saveUser({
-        username: username,
-        credentialId: credential.id,
-        publicKey: Utils.bufferToBase64url(credential.response.getPublicKey())
-    });
-    Utils.log(logId, "\nSaved to IndexedDB!");
 
     Utils.log(logId, "Sending raw attestation data to backend for secure decoding and validation...");
     
@@ -184,74 +98,6 @@ await Database.saveUser({
     
     Utils.log(logId, `Backend: ${backendResponse.message}`);
 
-	Utils.log(logId, "Deriving AES-GCM Vault Key from PRF...");
-	const prfResults = credential.getClientExtensionResults()?.prf;
-
-	if (prfResults && prfResults.enabled) {
-	
-	    if (prfResults.results && prfResults.results.first) {
-	        console.log("Success: PRF output generated during registration.");
-	        const prfOutput = prfResults.results.first;
-			const aesKey = await CryptoManager.deriveVaultKey(prfOutput);
-			console.log("Success! Your AES Key Object:", aesKey);
-			Utils.log(logId, "Registration Complete!");
-	    } 
-		else {
-			Utils.log(logId, "PRF extension is enabled but authenticators does not support PRF on creation.");
-			Utils.log(logId, "Need to initiate Login...");
-			await handleLogin(true);
-		}
-
-	} else {
-	    console.error("This authenticator does not support the PRF extension.");
-		await handleLogin(); 
-	}
-}
-
-async function handleLogin(isFallback = false) {
-    const logId = 'login-output';
-    
-    if (!isFallback) {
-        clearLogs(logId);
-    }
-	Utils.log(logId, isFallback ? "Continuing to PRF evaluation..." : "Starting Login...");
-
-	Utils.log(logId, "Setting up challenge...", true);
-
-	const encryptionSalt = Utils.generateChallenge();
-
-	const publicKeyRequest = {
-		challenge: Utils.generateChallenge(),
-		timeout: 60000,
-		rpId: window.location.hostname,
-		userVerification: "preferred",
-		extensions: { prf: { eval: { first: encryptionSalt } } }
-	};
-
-	Utils.log(logId, "Tap your YubiKey...");
-	const assertion = await navigator.credentials.get({ publicKey: publicKeyRequest });
-
-	const userHandle = assertion.response.userHandle;
-	if (!userHandle) throw new Error("No user handle found on this credential.");
-	const identifiedUsername = new TextDecoder().decode(userHandle);
-	Utils.log(logId, `Key identifies as: "${identifiedUsername}"`);
-
-	//const dbUser = await Database.getUser(identifiedUsername);
-	//if (!dbUser) {
-	//	if (window.PublicKeyCredential?.signalUnknownCredential) {
-	//		await PublicKeyCredential.signalUnknownCredential({ rpId: window.location.hostname, credentialId: assertion.id })
-	//			.catch(err => console.error("Signal API failed:", err));
-	//	}
-	//	throw new Error(`SECURITY ALERT: User "${identifiedUsername}" not found. Access Denied.`);
-	//}
-
-	Utils.log(logId, "Deriving AES-GCM Vault Key...");
-	const prfResults = assertion.getClientExtensionResults()?.prf?.results?.first;
-	const aesKey = await CryptoManager.deriveVaultKey(prfResults);
-
-	console.log("Recovered AES Key Object:", aesKey);
-	Utils.log(logId, "\nLOGIN SUCCESSFUL!");
-	Utils.log(logId, `Welcome back, ${identifiedUsername}`);
 }
 
 /**
@@ -266,15 +112,6 @@ document.getElementById('registerBtn').addEventListener('click', async () => {
 		await handleRegistration(username);
 	} catch (err) {
 		Utils.log('reg-output', `\nError: ${err.message}`);
-		console.error(err);
-	}
-});
-
-document.getElementById('loginBtn').addEventListener('click', async () => {
-	try {
-		await handleLogin();
-	} catch (err) {
-		Utils.log('login-output', `\nError: ${err.message}`);
 		console.error(err);
 	}
 });

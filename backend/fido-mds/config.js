@@ -5,6 +5,7 @@ module.exports = {
     blob: path.join(__dirname, 'blob.jwt'),
     rootCert: path.join(__dirname, 'root-r3.crt'),
     cacheJson: path.join(__dirname, 'cache.json'),
+    cacheNonFidoMDS: path.join(__dirname, 'cache-non-fido-mds.json'),
     errorLog: path.join(__dirname, 'mds-alerts.log')
   },
   urls: {

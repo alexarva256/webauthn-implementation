@@ -1,5 +1,6 @@
 require('reflect-metadata');
 
+const cache = require('./fido-mds/cache');
 const express = require('express');
 const cors = require('cors');
 const { executeFidoSync } = require('./fido-mds/sync');
@@ -29,5 +30,5 @@ async function startServer() {
     process.exit(1);
   }
 }
-
+cache.loadNonFidoMDS();
 startServer();

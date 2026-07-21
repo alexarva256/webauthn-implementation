@@ -26,32 +26,46 @@ router.post('/register', async (req, res) => {
         x5c = decodedAttObj.attStmt.x5c.map(certBuffer => certBuffer.toString('base64'));
     }
 
-    const mdsData = cache.memoryCache.data;
+    const mdsData = cache.memoryCache.data || {};
+    const nonFidoData = cache.memoryCache.nonFidoData || {};
+
     if (!mdsData) {
       return res.status(503).json({ error: "FIDO MDS cache is temporarily unavailable." });
     }
 
-    const metadataStatement = mdsData[aaguid];
-    if (!metadataStatement) {
-      return res.status(403).json({ error: "Unrecognized Authenticator (AAGUID not found in MDS)." });
-    }
+    const fidoMetadata = mdsData[aaguid];
+    const customMetadata = nonFidoData[aaguid];
 
-    console.log(`Device Identified: ${metadataStatement.description}`);
+    let deviceName = "Unknown Device";
 
-    if (x5c.length > 0) {
-      const isTrusted = await validateAuthenticatorTrust(metadataStatement, x5c);
-      
-      if (!isTrusted) {
-        return res.status(403).json({ error: "Authenticator failed FIDO trust verification." });
-      }
-      console.log("X.509 Trust Chain Validated Successfully!");
+    if (fidoMetadata) {
+   
+      deviceName = fidoMetadata.frinedlyNames.en-Us || "Unknown FIDO Device";
+    } else if (customMetadata) {
+      deviceName = customMetadata.name || "Unknown Custom Device";
     } else {
-      console.log("No x5c chain provided (Self-Attested). Skipping MDS trust check.");
+      return res.status(403).json({ error: "Unrecognized Authenticator (AAGUID not found in any MDS)." });
     }
 
+    console.log(`Device Identified: ${deviceName}`);
+
+    if(customMetadata === {}){
+      if (x5c.length > 0) {
+          const isTrusted = await validateAuthenticatorTrust(fidoMetadata, x5c);
+
+          if (!isTrusted) {
+            return res.status(403).json({ error: "Authenticator failed FIDO trust verification." });
+          }
+          console.log("X.509 Trust Chain Validated Successfully against FIDO root!");
+      } else {
+        console.log("No x5c chain provided (Self-Attested). Skipping MDS trust check.");
+      }
+    }
+  
     res.json({ 
       success: true, 
-      message: `Successfully validated ${metadataStatement.description} against FIDO MDS!` 
+      deviceName: deviceName,
+      message: `Successfully validated ${deviceName}!` 
     });
 
   } catch (error) {

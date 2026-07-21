@@ -16,22 +16,14 @@ async function validateAuthenticatorTrust(mdsEntry, attestationX5c) {
     return false; 
   }
 
-  if (mdsEntry.statusReports && mdsEntry.statusReports.length > 0) {
-    const latestStatus = mdsEntry.statusReports[0].status;
-    const dangerousStatuses = ['REVOKED', 'USER_VERIFICATION_BYPASS', 'ATTESTATION_KEY_COMPROMISE'];
-    
-    if (dangerousStatuses.includes(latestStatus)) {
-      throw new Error(`Authenticator rejected. FIDO Status: ${latestStatus}`);
-    }
-  }
-
   if (!mdsEntry.attestationRootCertificates || mdsEntry.attestationRootCertificates.length === 0) {
     throw new Error("MDS entry is missing trusted root certificates.");
   }
   const trustedRoots = mdsEntry.attestationRootCertificates.map(certStr => new X509Certificate(certStr));
 
   if (!attestationX5c || attestationX5c.length === 0) {
-    throw new Error("Attestation statement is missing the x5c chain.");
+    console.error("No attestation x5c chain provided by the authenticator.");
+    return false;
   }
   const leafCert = new X509Certificate(attestationX5c[0]);
   const intermediates = attestationX5c.slice(1).map(certStr => new X509Certificate(certStr));
@@ -47,10 +39,12 @@ async function validateAuthenticatorTrust(mdsEntry, attestationX5c) {
     const isTrustedAnchor = trustedRoots.some(root => root.thumbprint === builtRootThumbprint);
 
     if (!isTrustedAnchor) {
-      throw new Error("Attestation chain does not anchor to a trusted FIDO root.");
+      console.error("Attestation chain does not anchor to a trusted root from MDS.");
+      return false;
     }
 
     return true;
+    
   } catch (error) {
     console.error("Attestation trust chain validation failed:", error.message);
     return false;

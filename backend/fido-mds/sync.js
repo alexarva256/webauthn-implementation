@@ -20,6 +20,7 @@ async function fetchAndProcessBlob() {
   const { payloadMap, nextUpdate } = mds.parseAndFormatBlob(rawBlob);
   await cache.saveToDisk(rawBlob, payloadMap, nextUpdate);
   console.log(`MDS Cache updated. Next update: ${nextUpdate}`);
+
 }
 
 async function executeFidoSync() {
